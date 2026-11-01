@@ -194,13 +194,8 @@ jobs:
             --arg changelog "$base/download/$TAG/changelog.md" \
             '$ARGS.named' >release/update.json
 
-      - uses: actions/attest-build-provenance@v4
-        with:
-          subject-path: release/*
-
-      - name: Publish release
+      - name: Write notes
         env:
-          GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           YT: ${{ steps.meta.outputs.yt }}
           PATCHES: ${{ steps.meta.outputs.patches }}
@@ -209,17 +204,21 @@ jobs:
           STOCK_SOURCE: ${{ steps.meta.outputs.stock_source }}
           BUILD_MODE: ${{ steps.meta.outputs.build_mode }}
           SIGNER: ${{ steps.sign.outputs.signer }}
-          TAG: ${{ steps.meta.outputs.tag }}
-          TARGET: ${{ needs.bump-cli.outputs.sha }}
         run: |
           set -euo pipefail
           patches_repo=$(python3 -I -c 'import tomllib; print(tomllib.load(open("config.toml", "rb"))["patches-repo"])')
-          excluded=$(python3 -I -c 'import tomllib; print(", ".join(tomllib.load(open("config.toml", "rb")).get("excluded-patches", [])))')
           {
             echo "YouTube $YT patched with [$patches_repo $PATCHES](https://github.com/$patches_repo/releases/tag/$PATCHES)"
             echo
-            echo "Excluded patches: $excluded"
-            echo
+            for mode in apk module; do
+              jq -e --arg m "$mode" '.applied_patches[$m]' unsigned/build-info.json >/dev/null || continue
+              echo "<details><summary>Applied patches ($mode, $(jq --arg m "$mode" '.applied_patches[$m] | length' unsigned/build-info.json))</summary>"
+              echo
+              jq -r --arg m "$mode" '.applied_patches[$m][] | "- \(.)"' unsigned/build-info.json
+              echo
+              echo "</details>"
+              echo
+            done
             echo "| | SHA-256 |"
             echo "|---|---|"
             for f in release/*; do echo "| \`${f#release/}\` | \`$(sha256sum "$f" | cut -d' ' -f1)\` |"; done
@@ -230,9 +229,25 @@ jobs:
             echo "Verify: \`gh attestation verify <file> --repo $GH_REPO\`"
           } >notes.md
           if [ "$BUILD_MODE" != apk ]; then cp notes.md release/changelog.md; fi
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: release/*
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          YT: ${{ steps.meta.outputs.yt }}
+          PATCHES: ${{ steps.meta.outputs.patches }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          TARGET: ${{ needs.bump-cli.outputs.sha }}
+        run: |
+          set -euo pipefail
+          title="YouTube $YT (patches $PATCHES) $(TZ=Asia/Seoul date +%F)"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" release/* --clobber
-            gh release edit "$TAG" --notes-file notes.md
+            gh release edit "$TAG" --title "$title" --notes-file notes.md
           else
-            gh release create "$TAG" release/* --title "YouTube $YT (patches $PATCHES)" --notes-file notes.md --target "$TARGET"
+            gh release create "$TAG" release/* --title "$title" --notes-file notes.md --target "$TARGET"
           fi

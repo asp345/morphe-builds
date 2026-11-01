@@ -289,6 +289,7 @@ jq -n \
 	--arg stock_signer "$STOCK_SIGNER" \
 	--argjson excluded_patches "$(jq -n '$ARGS.positional' --args "${EXCLUDED_PATCHES[@]}")" \
 	--argjson included_patches "$(jq -n '$ARGS.positional' --args "${INCLUDED_PATCHES[@]}")" \
+	--argjson applied_patches "$(for mode in "${MODES[@]}"; do jq --arg m "$mode" '{($m): .appliedPatches}' "$TEMP_DIR/patch-result-$mode.json"; done | jq -s add)" \
 	'$ARGS.named' >"$BUILD_DIR/build-info.json"
 
 pr "Built YouTube $YT_VERSION with patches $PATCHES_TAG ($BUILD_MODE)"

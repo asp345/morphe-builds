@@ -207,18 +207,10 @@ jobs:
         run: |
           set -euo pipefail
           patches_repo=$(python3 -I -c 'import tomllib; print(tomllib.load(open("config.toml", "rb"))["patches-repo"])')
+          for f in unsigned/patch-result-*.json; do jq . "$f" >"release/${f#unsigned/}"; done
           {
             echo "YouTube $YT patched with [$patches_repo $PATCHES](https://github.com/$patches_repo/releases/tag/$PATCHES)"
             echo
-            for mode in apk module; do
-              jq -e --arg m "$mode" '.applied_patches[$m]' unsigned/build-info.json >/dev/null || continue
-              echo "<details><summary>Applied patches ($mode, $(jq --arg m "$mode" '.applied_patches[$m] | length' unsigned/build-info.json))</summary>"
-              echo
-              jq -r --arg m "$mode" '.applied_patches[$m][] | "- \(.)"' unsigned/build-info.json
-              echo
-              echo "</details>"
-              echo
-            done
             echo "| | SHA-256 |"
             echo "|---|---|"
             for f in release/*; do echo "| \`${f#release/}\` | \`$(sha256sum "$f" | cut -d' ' -f1)\` |"; done

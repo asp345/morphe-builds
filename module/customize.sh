@@ -18,8 +18,6 @@ elif [ "$ARCH" = "x64" ]; then
 	ARCH_LIB=x86_64
 else abort "ERROR: unreachable: ${ARCH}"; fi
 
-set_perm_recursive "$MODPATH/bin" 0 0 0755 0777
-
 umount_all
 
 IS_SYSTEM_APP=false
@@ -176,26 +174,17 @@ ui_print "* Optimizing $PKG_NAME"
 cmd package compile -m speed-profile -f "$PKG_NAME" >/dev/null 2>&1
 # nohup cmd package compile -m speed-profile -f "$PKG_NAME" >/dev/null 2>&1
 
-if [ "$KSU" ]; then
-	DUMPSYS=$(dumpsys package "$PKG_NAME" 2>&1)
-	UID=$(echo "$DUMPSYS" | grep -m1 uid=)
-	UID=${UID#*=} UID=${UID%% *}
-	if [ -z "$UID" ]; then
-		UID=$(echo "$DUMPSYS" | grep -m1 userId=)
-		UID=${UID#*=} UID=${UID%% *}
-	fi
-	if [ "$UID" ]; then
-		if ! OP=$("${MODPATH:?}/bin/$ARCH/ksu_profile" "$UID" "$PKG_NAME" 2>&1); then
-			ui_print "  $OP"
-			ui_print "  * In your root manager app,"
-			ui_print "    disable 'Unmount modules' for $PKG_NAME"
-		fi
-	else
-		ui_print "ERROR: UID could not be found for $PKG_NAME"
+if [ "$KSU" ] && [ -z "$APATCH" ]; then
+	[ -d "$MODPATH/bin" ] && set_perm_recursive "$MODPATH/bin" 0 0 0755 0755
+	APP_UID=$(dumpsys package "$PKG_NAME" 2>&1 | grep -m1 -E '(^| )(uid|userId)=[0-9]+' | sed -E 's/.*(uid|userId)=([0-9]+).*/\2/')
+	if [ -z "$APP_UID" ] || [ ! -x "$MODPATH/bin/$ARCH/ksu_profile" ] || ! OP=$("$MODPATH/bin/$ARCH/ksu_profile" "$APP_UID" "$PKG_NAME" 2>&1); then
+		[ -n "${OP-}" ] && ui_print "  $OP"
+		ui_print "* In your root manager app,"
+		ui_print "  disable 'Unmount modules' for $PKG_NAME"
 	fi
 fi
 
-rm -rf "${MODPATH:?}/bin" "$MODPATH/stock/"
+rm -rf "${MODPATH:?}/stock/" "${MODPATH:?}/bin/"
 cp -f "$MODPATH/module.prop" "$MODPATH/module.prop.orig"
 
 ui_print "* Done. No need to reboot."

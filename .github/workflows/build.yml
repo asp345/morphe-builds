@@ -1,157 +1,233 @@
-name: Build Modules
-on:
-  workflow_call:
-    inputs:
-      from_ci:
-        type: boolean
-        required: false
-        default: true
+name: Build YouTube
 
+on:
+  schedule:
+    - cron: "0 16 * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: Build even if a release for the latest patches already exists
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: build
+  cancel-in-progress: false
 
 jobs:
-  run:
-    permissions: write-all
+  bump-cli:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.bump.outputs.sha }}
     steps:
-      - uses: actions/setup-java@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(./bump-cli.sh config.toml)
+          if ! git diff --quiet config.toml; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -q -m "Bump CLI to $tag" config.toml
+            git push -q origin "HEAD:$GITHUB_REF"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+
+  check:
+    needs: bump-cli
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          distribution: "zulu"
+          ref: ${{ needs.bump-cli.outputs.sha }}
+          persist-credentials: false
+
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force || 'false' }}
+        run: |
+          tag=$(./build.sh config.toml --patches-tag)
+          if [ "$FORCE" != true ] && gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+            jq -e --arg s "-patches-$tag" 'any(.[]; .tag_name | endswith($s))' >/dev/null; then
+            echo "patches $tag already built"
+            echo "build=false" >>"$GITHUB_OUTPUT"
+          else
+            echo "build=true" >>"$GITHUB_OUTPUT"
+          fi
+
+  patch:
+    needs: [bump-cli, check]
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.bump-cli.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: zulu
           java-version: "21"
 
-      - name: Checkout
-        uses: actions/checkout@v6
+      - name: Patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./build.sh config.toml
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          fetch-depth: 0
-          submodules: true
+          name: unsigned
+          path: build/
+          if-no-files-found: error
+          retention-days: 3
 
-      - name: Update config
-        if: ${{ inputs.from_ci }}
+  release:
+    needs: [bump-cli, patch]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.bump-cli.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: zulu
+          java-version: "21"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unsigned
+          path: unsigned
+
+      - name: Read build info
+        id: meta
         run: |
-          if git checkout origin/update build.md; then
-            UPDATE_CFG=$(./build.sh config.toml --config-update)
-            if [ "$UPDATE_CFG" ]; then
-              echo "'$UPDATE_CFG'"
-              echo "$UPDATE_CFG" > config.json
-            fi
-          fi
+          set -euo pipefail
+          info=unsigned/build-info.json
+          yt=$(jq -r .youtube_version "$info")
+          patches=$(jq -r .patches_tag "$info")
+          stock_sha256=$(jq -r .stock_sha256 "$info")
+          stock_signer=$(jq -r .stock_signer "$info")
+          stock_source=$(jq -r .stock_source "$info")
+          arch=$(python3 -I -c 'import tomllib; print(tomllib.load(open("config.toml", "rb")).get("arch", "arm64-v8a"))')
+          build_mode=$(python3 -I -c 'import tomllib; print(tomllib.load(open("config.toml", "rb")).get("build-mode", "both"))')
+          [[ $yt =~ ^[0-9]+(\.[0-9]+)+$ ]]
+          [[ $patches =~ ^v[0-9]+(\.[0-9]+)+$ ]]
+          [[ $stock_sha256 =~ ^[0-9a-f]{64}$ ]]
+          [[ $stock_signer =~ ^[0-9a-f]{64}$ ]]
+          [[ $stock_source =~ ^(archive\.org|apkmirror|cache)$ ]]
+          [[ $arch =~ ^(arm64-v8a|arm-v7a|x86|x86_64|all)$ ]]
+          [[ $build_mode =~ ^(apk|module|both)$ ]]
+          {
+            echo "yt=$yt"
+            echo "patches=$patches"
+            echo "stock_sha256=$stock_sha256"
+            echo "stock_signer=$stock_signer"
+            echo "stock_source=$stock_source"
+            echo "build_mode=$build_mode"
+            echo "apk=youtube-morphe-$yt-$arch.apk"
+            echo "zip=youtube-morphe-module-$yt-$arch.zip"
+            echo "tag=youtube-$yt-patches-$patches"
+          } >>"$GITHUB_OUTPUT"
 
-      - name: Get next version code
-        id: next_ver_code
+      - name: Sign
+        id: sign
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          BUILD_MODE: ${{ steps.meta.outputs.build_mode }}
+          APK: ${{ steps.meta.outputs.apk }}
         run: |
-          TAG=$(gh release list -L 1 | awk -F '\t' '{print $3}')
-          if [ -z "$TAG" ]; then TAG=0; fi
-          echo "NEXT_VER_CODE=$((TAG + 1))" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          export KEYSTORE="$RUNNER_TEMP/release.keystore"
+          (umask 077 && base64 -d <<<"$KEYSTORE_B64" >"$KEYSTORE")
+          mkdir release work
+          signed=()
+          if [ "$BUILD_MODE" != module ]; then ./sign.sh unsigned/youtube-apk-unsigned.apk "release/$APK" && signed+=("release/$APK"); fi
+          if [ "$BUILD_MODE" != apk ]; then ./sign.sh unsigned/youtube-module-unsigned.apk work/module.apk && signed+=(work/module.apk); fi
+          rm -f "$KEYSTORE"
+          signer=$(java -jar bin/apksigner.jar verify --print-certs "${signed[0]}" | grep '^Signer #1 certificate SHA-256' | awk '{print $NF}')
+          echo "signer=$signer" >>"$GITHUB_OUTPUT"
 
-      - name: Build modules/APKs
-        run: if [ -f "config.json" ]; then ./build.sh config.json; else ./build.sh config.toml; fi
+      - name: Build module
+        if: steps.meta.outputs.build_mode != 'apk'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: $GITHUB_REPOSITORY
-          NEXT_VER_CODE: ${{ steps.next_ver_code.outputs.NEXT_VER_CODE }}
+          YT: ${{ steps.meta.outputs.yt }}
+          PATCHES: ${{ steps.meta.outputs.patches }}
+          ZIP: ${{ steps.meta.outputs.zip }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          base="https://github.com/$GITHUB_REPOSITORY/releases"
+          ANDROID_NDK="$ANDROID_NDK_LATEST_HOME" UPDATE_JSON="$base/latest/download/update.json" \
+            ./module.sh work/module.apk unsigned/stock.apk "$YT" "$PATCHES" "$GITHUB_RUN_NUMBER" "release/$ZIP"
+          jq -n \
+            --arg version "v$YT (patches $PATCHES)" \
+            --argjson versionCode "$GITHUB_RUN_NUMBER" \
+            --arg zipUrl "$base/download/$TAG/$ZIP" \
+            --arg changelog "$base/download/$TAG/changelog.md" \
+            '$ARGS.named' >release/update.json
 
-      - name: Get output
-        id: get_output
-        run: |
-          DELIM="$(openssl rand -hex 8)"
-          echo "BUILD_LOG<<${DELIM}" >> "$GITHUB_OUTPUT"
-          cat build.md >> "$GITHUB_OUTPUT"
-          echo "${DELIM}" >> "$GITHUB_OUTPUT"
-          cp -f build.md build.tmp
-      
-      - name: Upload release
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*
+
+      - name: Publish release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.next_ver_code.outputs.NEXT_VER_CODE }}
-          BODY: ${{ steps.get_output.outputs.BUILD_LOG }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          YT: ${{ steps.meta.outputs.yt }}
+          PATCHES: ${{ steps.meta.outputs.patches }}
+          STOCK_SHA256: ${{ steps.meta.outputs.stock_sha256 }}
+          STOCK_SIGNER: ${{ steps.meta.outputs.stock_signer }}
+          STOCK_SOURCE: ${{ steps.meta.outputs.stock_source }}
+          BUILD_MODE: ${{ steps.meta.outputs.build_mode }}
+          SIGNER: ${{ steps.sign.outputs.signer }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          TARGET: ${{ needs.bump-cli.outputs.sha }}
         run: |
-          ls -lh ./build/*
+          set -euo pipefail
+          patches_repo=$(python3 -I -c 'import tomllib; print(tomllib.load(open("config.toml", "rb"))["patches-repo"])')
+          excluded=$(python3 -I -c 'import tomllib; print(", ".join(tomllib.load(open("config.toml", "rb")).get("excluded-patches", [])))')
+          {
+            echo "YouTube $YT patched with [$patches_repo $PATCHES](https://github.com/$patches_repo/releases/tag/$PATCHES)"
+            echo
+            echo "Excluded patches: $excluded"
+            echo
+            echo "| | SHA-256 |"
+            echo "|---|---|"
+            for f in release/*; do echo "| \`${f#release/}\` | \`$(sha256sum "$f" | cut -d' ' -f1)\` |"; done
+            echo "| APK signing certificate | \`$SIGNER\` |"
+            echo "| Stock APK ($STOCK_SOURCE) | \`$STOCK_SHA256\` |"
+            echo "| Stock APK signing certificate | \`$STOCK_SIGNER\` |"
+            echo
+            echo "Verify: \`gh attestation verify <file> --repo $GH_REPO\`"
+          } >notes.md
+          if [ "$BUILD_MODE" != apk ]; then cp notes.md release/changelog.md; fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "Release" --notes "$BODY"
-            gh release upload "$TAG" ./build/* --clobber
+            gh release upload "$TAG" release/* --clobber
+            gh release edit "$TAG" --notes-file notes.md
           else
-            gh release create "$TAG" ./build/* --title "Release" --notes "$BODY"
+            gh release create "$TAG" release/* --title "YouTube $YT (patches $PATCHES)" --notes-file notes.md --target "$TARGET"
           fi
-
-      - name: Update modules changelog and update json
-        id: update_config
-        run: |
-          git checkout -f update || git switch --discard-changes --orphan update
-          cp -f build.tmp build.md
-          get_update_json() {
-            echo "{
-            \"version\": \"$1\",
-            \"versionCode\": ${{ steps.next_ver_code.outputs.NEXT_VER_CODE }},
-            \"zipUrl\": \"$2\",
-            \"changelog\": \"https://raw.githubusercontent.com/$GITHUB_REPOSITORY/update/build.md\"
-          }"
-          }
-
-          cd build || { echo "build folder not found"; exit 1; }
-          for OUTPUT in *module*.zip; do
-            [ "$OUTPUT" = "*module*.zip" ] && continue
-            ZIP_S=$(unzip -p "$OUTPUT" module.prop)
-            if ! UPDATE_JSON=$(echo "$ZIP_S" | grep updateJson); then continue; fi
-            UPDATE_JSON="${UPDATE_JSON##*/}"
-            VER=$(echo "$ZIP_S" | grep version=)
-            VER="${VER##*=}"
-            DLURL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/${{ steps.next_ver_code.outputs.NEXT_VER_CODE }}/${OUTPUT}"
-            get_update_json "$VER" "$DLURL" >"../$UPDATE_JSON"
-          done
-          cd ..
-
-          find . -name "*-update.json" | grep . || : >dummy-update.json
-
-      - name: Commit module json changes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-      
-          git add build.md *-update.json
-      
-          if ! git diff --cached --quiet; then
-            git commit -m "Bump version ${{ steps.next_ver_code.outputs.NEXT_VER_CODE }}"
-            git push origin HEAD:update
-          else
-            echo "no changes!"
-          fi
-
-      - name: Report to Telegram
-        env:
-          TG_TOKEN: ${{ secrets.TG_TOKEN }}
-        if: env.TG_TOKEN != null
-        run: |
-          cd build || { echo "build folder not found"; exit 1; }
-
-          TG_CHAT="@rvc_magisk"
-          NL=$'\n'
-          APKS=""
-          MODULES=""
-          for OUTPUT in *; do
-            DL_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/${{ steps.next_ver_code.outputs.NEXT_VER_CODE }}/${OUTPUT}"
-            if [[ $OUTPUT = *.apk ]]; then
-              APKS+="${NL}📦[${OUTPUT}](${DL_URL})"
-            elif [[ $OUTPUT = *.zip ]]; then
-              MODULES+="${NL}📦[${OUTPUT}](${DL_URL})"
-            fi
-          done
-          if [ -n "$MODULES" ]; then
-            MODULES="Modules:${NL}${MODULES#"$NL"}"
-            if [ -n "$APKS" ]; then MODULES+=${NL}${NL}; fi
-          fi
-          if [ -n "$APKS" ]; then APKS="APKs:${NL}${APKS#"$NL"}"; fi
-
-          BODY="$(cat ../build.md)"
-          MSG="*New build!*
-
-          ${BODY}
-
-          *▼ Download Links:*
-          ${MODULES}${APKS}
-          "
-          echo "'$MSG'"
-          MSG=${MSG:0:9450}
-          POST="https://api.telegram.org/bot${TG_TOKEN}/sendMessage"
-          curl -X POST --data-urlencode "parse_mode=Markdown" --data-urlencode "disable_web_page_preview=true" --data-urlencode "text=${MSG}" --data-urlencode "chat_id=${TG_CHAT}" "$POST"

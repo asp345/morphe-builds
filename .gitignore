@@ -1,9 +1,6 @@
 *.apk
-*.zip
+*.keystore
 /temp
 /build
-test*
-/logs
-build.md
-cmpr
-*-temporary-files
+/unsigned
+/release

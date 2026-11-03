@@ -83,6 +83,16 @@ req() {
 	fi
 }
 
+get_cf_clearance() {
+	local chrome=${CHROME:-google-chrome} major clearance
+	command -v node >/dev/null || abort "'node' is not installed"
+	major=$("$chrome" --version | grep -oE '[0-9]+\.' | head -1) || abort "'$chrome' is not a Chrome binary"
+	USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}0.0.0 Safari/537.36"
+	pr "Passing the Cloudflare challenge of $1 with $chrome"
+	clearance=$(node cf-clearance.mjs "$chrome" "$1" "$USER_AGENT") || return 1
+	printf '.apkmirror.com\tTRUE\t/\tTRUE\t0\tcf_clearance\t%s\n' "$clearance" >>"$TEMP_DIR/cookie.txt"
+}
+
 get_htmlq() {
 	local tgz="$TEMP_DIR/htmlq-x86_64-linux.tar.gz"
 	if [ ! -f "$tgz" ]; then
@@ -151,7 +161,7 @@ resolve_version() {
 	local op
 	op=$(java_isolated -jar "$CLI_JAR" list-versions --patches="$PATCHES_FILE" -f "$PKG_NAME" 2>&1) ||
 		abort "list-versions failed: $op"
-	sed -n '/Most common compatible versions:/,$p' <<<"$op" | awk -v re="$VERSION_RE" 'NR > 1 && $1 ~ re {print $1}' | sort -V | tail -1
+	sed -n '/Most common compatible versions:/,$p' <<<"$op" | awk -v re="$VERSION_RE" 'NR > 1 && $1 ~ re {$1 = $1; print}' | sort -V | tail -1
 }
 
 dl_archive() {
@@ -180,13 +190,21 @@ apkmirror_search() {
 		app_table=$($HTMLQ --text --ignore-whitespace <<<"$node")
 		[ "$(sed -n 3p <<<"$app_table")" = "$type" ] || continue
 		dlurl=$($HTMLQ --base https://www.apkmirror.com --attribute href "div:nth-child(1) > a:nth-child(1)" <<<"$node")
+		if [ -n "$APP_VERSION_CODE" ]; then
+			if $HTMLQ "div.table-row.headerFont:nth-last-child($n)" --text --ignore-whitespace <<<"$resp" | grep -qFx -- "$APP_VERSION_CODE" &&
+				printf '%s\n' "${apparch[@]}" | grep -qFx -- "$(sed -n 4p <<<"$app_table")"; then
+				echo "$dlurl"
+				return 0
+			fi
+			continue
+		fi
 		if printf '%s\n' "${appdpi[@]}" | grep -qFx -- "$(sed -n 6p <<<"$app_table")" &&
 			printf '%s\n' "${apparch[@]}" | grep -qFx -- "$(sed -n 4p <<<"$app_table")"; then
 			echo "$dlurl"
 			return 0
 		fi
 	done
-	if [ "$n" -eq 2 ] && [ -n "$dlurl" ]; then
+	if [ -z "$APP_VERSION_CODE" ] && [ "$n" -eq 2 ] && [ -n "$dlurl" ]; then
 		echo "$dlurl"
 		return 0
 	fi
@@ -196,7 +214,10 @@ apkmirror_search() {
 dl_apkmirror() {
 	local version=$1 base=$2 arch=$ARCH ext=apk app_page name url resp dlurl type
 	if [ "$arch" = arm-v7a ]; then arch=armeabi-v7a; fi
-	app_page=$(req "$APKMIRROR_DLURL" -) || return 1
+	if ! app_page=$(req "$APKMIRROR_DLURL" - 2>/dev/null); then
+		get_cf_clearance "$APKMIRROR_DLURL" || return 1
+		app_page=$(req "$APKMIRROR_DLURL" -) || return 1
+	fi
 	name=$($HTMLQ "h1.marginZero" --text <<<"$app_page")
 	name=${name,,} name=${name// /-} name=${name//[^a-z0-9-]/}
 	resp=$(req "${APKMIRROR_DLURL}/${name}-${version//./-}-release/" -) || return 1
@@ -209,7 +230,7 @@ dl_apkmirror() {
 			fi
 		done
 		if [ -z "$dlurl" ]; then
-			epr "no $arch variant of $version found on APKMirror"
+			epr "no $arch variant of $version${APP_VERSION_CODE:+ ($APP_VERSION_CODE)} found on APKMirror"
 			return 1
 		fi
 		resp=$(req "$dlurl" -) || return 1
@@ -288,9 +309,19 @@ get_cli
 get_patches_release
 get_patches
 check_patch_names
-APP_VERSION=$(resolve_version)
+version_line=$(resolve_version)
+APP_VERSION=${version_line%% *}
 [[ $APP_VERSION =~ $VERSION_RE ]] || abort "could not determine a $APP version (got '$APP_VERSION')"
-pr "Choosing $APP $APP_VERSION"
+case "$ARCH" in
+arm64-v8a) abi_key=ARM64_V8A ;;
+arm-v7a) abi_key=ARMEABI_V7A ;;
+x86) abi_key=X86 ;;
+x86_64) abi_key=X86_64 ;;
+all) abi_key="" ;;
+esac
+APP_VERSION_CODE=""
+if [ -n "$abi_key" ]; then APP_VERSION_CODE=$(sed -nE "s/.*[[ ,]${abi_key}=([0-9]+).*/\1/p" <<<"$version_line"); fi
+pr "Choosing $APP $APP_VERSION${APP_VERSION_CODE:+ (version code $APP_VERSION_CODE)}"
 get_stock "$APP_VERSION"
 if [ "$BUILD_MODE" != apk ] && [ "${STOCK_APK##*.}" != apk ]; then abort "module needs a single stock apk, got '$STOCK_APK'"; fi
 

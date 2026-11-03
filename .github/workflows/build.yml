@@ -92,3 +92,4 @@ jobs:
     with:
       app: ${{ matrix.app }}
       sha: ${{ needs.bump-cli.outputs.sha }}
+    secrets: inherit

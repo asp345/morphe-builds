@@ -86,6 +86,8 @@ req() {
 get_cf_clearance() {
 	local chrome=${CHROME:-google-chrome} major clearance
 	command -v node >/dev/null || abort "'node' is not installed"
+	command -v Xvfb >/dev/null || abort "'Xvfb' is not installed"
+	command -v xdotool >/dev/null || abort "'xdotool' is not installed"
 	major=$("$chrome" --version | grep -oE '[0-9]+\.' | head -1) || abort "'$chrome' is not a Chrome binary"
 	USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}0.0.0 Safari/537.36"
 	pr "Passing the Cloudflare challenge of $1 with $chrome"

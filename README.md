@@ -43,5 +43,5 @@ In the `release` environment:
 - [htmlq](https://github.com/mgdm/htmlq) v0.4.0
 - [apksigner](bin/apksigner.jar) from Android build-tools 34
 - Android NDK
-- Google Chrome and Node.js 22+, for APKMirror pages behind a Cloudflare challenge
+- Google Chrome, Xvfb and xdotool, and Node.js 22+, for APKMirror pages behind a Cloudflare challenge
 - `bash`, `curl`, `jq`, `java` 21, `python3` 3.11+, `tar`, `gh` 2.49+

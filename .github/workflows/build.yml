@@ -1,4 +1,4 @@
-name: Build YouTube
+name: Build
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: Build even if a release for the latest patches already exists
+        description: Build every app even if a release for its newest patches already exists
         type: boolean
         default: false
 
@@ -51,7 +51,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      build: ${{ steps.check.outputs.build }}
+      apps: ${{ steps.check.outputs.apps }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -63,183 +63,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           FORCE: ${{ inputs.force || 'false' }}
         run: |
-          tag=$(./build.sh config.toml --patches-tag)
-          if [ "$FORCE" != true ] && gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
-            jq -e --arg s "-patches-$tag" 'any(.[]; .tag_name | endswith($s))' >/dev/null; then
-            echo "patches $tag already built"
-            echo "build=false" >>"$GITHUB_OUTPUT"
-          else
-            echo "build=true" >>"$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          releases=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          apps=()
+          for app in $(./build.sh --apps); do
+            tag=$(./build.sh "$app" --patches-tag)
+            if [ "$FORCE" != true ] && jq -e --arg p "${app,,}-" --arg s "-patches-$tag" \
+              'any(.[]; .tag_name | startswith($p) and endswith($s))' <<<"$releases" >/dev/null; then
+              echo "$app: patches $tag already built"
+            else
+              apps+=("$app")
+            fi
+          done
+          echo "apps=$(jq -cn '$ARGS.positional' --args "${apps[@]}")" >>"$GITHUB_OUTPUT"
 
-  patch:
+  build:
     needs: [bump-cli, check]
-    if: needs.check.outputs.build == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.bump-cli.outputs.sha }}
-          persist-credentials: false
-
-      - uses: actions/setup-java@v6
-        with:
-          distribution: zulu
-          java-version: "21"
-
-      - name: Patch
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./build.sh config.toml
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: unsigned
-          path: build/
-          if-no-files-found: error
-          retention-days: 3
-
-  release:
-    needs: [bump-cli, patch]
-    runs-on: ubuntu-latest
-    environment: release
+    if: needs.check.outputs.apps != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.check.outputs.apps) }}
     permissions:
       contents: write
       id-token: write
       attestations: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.bump-cli.outputs.sha }}
-          persist-credentials: false
-
-      - uses: actions/setup-java@v6
-        with:
-          distribution: zulu
-          java-version: "21"
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: unsigned
-          path: unsigned
-
-      - name: Read build info
-        id: meta
-        run: |
-          set -euo pipefail
-          info=unsigned/build-info.json
-          yt=$(jq -r .youtube_version "$info")
-          patches=$(jq -r .patches_tag "$info")
-          stock_sha256=$(jq -r .stock_sha256 "$info")
-          stock_signer=$(jq -r .stock_signer "$info")
-          stock_source=$(jq -r .stock_source "$info")
-          arch=$(python3 -I -c 'import tomllib; print(tomllib.load(open("config.toml", "rb")).get("arch", "arm64-v8a"))')
-          build_mode=$(python3 -I -c 'import tomllib; print(tomllib.load(open("config.toml", "rb")).get("build-mode", "both"))')
-          [[ $yt =~ ^[0-9]+(\.[0-9]+)+$ ]]
-          [[ $patches =~ ^v[0-9]+(\.[0-9]+)+$ ]]
-          [[ $stock_sha256 =~ ^[0-9a-f]{64}$ ]]
-          [[ $stock_signer =~ ^[0-9a-f]{64}$ ]]
-          [[ $stock_source =~ ^(archive\.org|apkmirror|cache)$ ]]
-          [[ $arch =~ ^(arm64-v8a|arm-v7a|x86|x86_64|all)$ ]]
-          [[ $build_mode =~ ^(apk|module|both)$ ]]
-          {
-            echo "yt=$yt"
-            echo "patches=$patches"
-            echo "stock_sha256=$stock_sha256"
-            echo "stock_signer=$stock_signer"
-            echo "stock_source=$stock_source"
-            echo "build_mode=$build_mode"
-            echo "apk=youtube-morphe-$yt-$arch.apk"
-            echo "zip=youtube-morphe-module-$yt-$arch.zip"
-            echo "tag=youtube-$yt-patches-$patches"
-          } >>"$GITHUB_OUTPUT"
-
-      - name: Sign
-        id: sign
-        env:
-          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          BUILD_MODE: ${{ steps.meta.outputs.build_mode }}
-          APK: ${{ steps.meta.outputs.apk }}
-        run: |
-          set -euo pipefail
-          export KEYSTORE="$RUNNER_TEMP/release.keystore"
-          (umask 077 && base64 -d <<<"$KEYSTORE_B64" >"$KEYSTORE")
-          mkdir release work
-          signed=()
-          if [ "$BUILD_MODE" != module ]; then ./sign.sh unsigned/youtube-apk-unsigned.apk "release/$APK" && signed+=("release/$APK"); fi
-          if [ "$BUILD_MODE" != apk ]; then ./sign.sh unsigned/youtube-module-unsigned.apk work/module.apk && signed+=(work/module.apk); fi
-          rm -f "$KEYSTORE"
-          signer=$(java -jar bin/apksigner.jar verify --print-certs "${signed[0]}" | grep '^Signer #1 certificate SHA-256' | awk '{print $NF}')
-          echo "signer=$signer" >>"$GITHUB_OUTPUT"
-
-      - name: Build module
-        if: steps.meta.outputs.build_mode != 'apk'
-        env:
-          YT: ${{ steps.meta.outputs.yt }}
-          PATCHES: ${{ steps.meta.outputs.patches }}
-          ZIP: ${{ steps.meta.outputs.zip }}
-          TAG: ${{ steps.meta.outputs.tag }}
-        run: |
-          set -euo pipefail
-          base="https://github.com/$GITHUB_REPOSITORY/releases"
-          ANDROID_NDK="$ANDROID_NDK_LATEST_HOME" UPDATE_JSON="$base/latest/download/update.json" \
-            ./module.sh work/module.apk unsigned/stock.apk "$YT" "$PATCHES" "$GITHUB_RUN_NUMBER" "release/$ZIP"
-          jq -n \
-            --arg version "v$YT (patches $PATCHES)" \
-            --argjson versionCode "$GITHUB_RUN_NUMBER" \
-            --arg zipUrl "$base/download/$TAG/$ZIP" \
-            --arg changelog "$base/download/$TAG/changelog.md" \
-            '$ARGS.named' >release/update.json
-
-      - name: Write notes
-        env:
-          GH_REPO: ${{ github.repository }}
-          YT: ${{ steps.meta.outputs.yt }}
-          PATCHES: ${{ steps.meta.outputs.patches }}
-          STOCK_SHA256: ${{ steps.meta.outputs.stock_sha256 }}
-          STOCK_SIGNER: ${{ steps.meta.outputs.stock_signer }}
-          STOCK_SOURCE: ${{ steps.meta.outputs.stock_source }}
-          BUILD_MODE: ${{ steps.meta.outputs.build_mode }}
-          SIGNER: ${{ steps.sign.outputs.signer }}
-        run: |
-          set -euo pipefail
-          patches_repo=$(python3 -I -c 'import tomllib; print(tomllib.load(open("config.toml", "rb"))["patches-repo"])')
-          for f in unsigned/patch-result-*.json; do jq . "$f" >"release/${f#unsigned/}"; done
-          {
-            echo "YouTube $YT patched with [$patches_repo $PATCHES](https://github.com/$patches_repo/releases/tag/$PATCHES)"
-            echo
-            echo "| | SHA-256 |"
-            echo "|---|---|"
-            for f in release/*; do echo "| \`${f#release/}\` | \`$(sha256sum "$f" | cut -d' ' -f1)\` |"; done
-            echo "| APK signing certificate | \`$SIGNER\` |"
-            echo "| Stock APK ($STOCK_SOURCE) | \`$STOCK_SHA256\` |"
-            echo "| Stock APK signing certificate | \`$STOCK_SIGNER\` |"
-            echo
-            echo "Verify: \`gh attestation verify <file> --repo $GH_REPO\`"
-          } >notes.md
-          if [ "$BUILD_MODE" != apk ]; then cp notes.md release/changelog.md; fi
-
-      - uses: actions/attest-build-provenance@v4
-        with:
-          subject-path: release/*
-
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          YT: ${{ steps.meta.outputs.yt }}
-          PATCHES: ${{ steps.meta.outputs.patches }}
-          TAG: ${{ steps.meta.outputs.tag }}
-          TARGET: ${{ needs.bump-cli.outputs.sha }}
-        run: |
-          set -euo pipefail
-          title="YouTube $YT (patches $PATCHES) $(TZ=Asia/Seoul date +%F)"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" release/* --clobber
-            gh release edit "$TAG" --title "$title" --notes-file notes.md
-          else
-            gh release create "$TAG" release/* --title "$title" --notes-file notes.md --target "$TARGET"
-          fi
+    uses: ./.github/workflows/app.yml
+    with:
+      app: ${{ matrix.app }}
+      sha: ${{ needs.bump-cli.outputs.sha }}

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-PKG_NAME="com.google.android.youtube"
 APKSIGNER="bin/apksigner.jar"
 APKSIGNER_SHA256="eefdd6aed9db9fb849e4c98a50d8741e19d1b674ba6547220bcb9c3ed152123a"
 
@@ -26,17 +25,43 @@ apksigner() {
 	"$JAVA_BIN" -jar "$APKSIGNER" "$@"
 }
 
-stock_signature() {
-	local expected sig
-	expected=$(awk -v p="$PKG_NAME" '$2 == p {print $1}' sig.txt)
-	[ -n "$expected" ] || abort "no signature for $PKG_NAME in sig.txt"
-	sig=$(apksigner verify --print-certs "$1" | grep '^Signer' | grep 'SHA-256' | tail -1 | awk '{print $NF}') ||
-		abort "apksigner could not verify '$1'"
-	[ "$sig" = "$expected" ] || abort "stock apk signature mismatch: expected $expected, got '$sig'"
-	echo "$sig"
-}
-
 config_json() {
 	python3 -I -c 'import json, sys, tomllib; print(json.dumps(tomllib.load(open(sys.argv[1], "rb"))))' "$1" ||
 		abort "could not parse $1"
+}
+
+app_cfg() {
+	config_json config.toml | jq -r --arg a "$1" --arg k "$2" --arg d "${3-}" '.[$a][$k] // $d | strings'
+}
+
+apk_signer() {
+	apksigner verify --print-certs "$1" | grep '^Signer' | grep 'SHA-256' | tail -1 | awk '{print $NF}'
+}
+
+stock_signature() {
+	local file=$1 pkg=$2 expected sig apk dir
+	expected=$(awk -v p="$pkg" '$2 == p {print $1}' sig.txt)
+	if [ "${file##*.}" = apkm ]; then
+		dir=$(mktemp -d)
+		python3 -I -c 'import os, sys, zipfile
+z = zipfile.ZipFile(sys.argv[1])
+for n in z.namelist():
+    if n.endswith(".apk"):
+        open(os.path.join(sys.argv[2], os.path.basename(n)), "wb").write(z.read(n))' "$file" "$dir" ||
+			abort "could not read bundle '$file'"
+		set -- "$dir"/*.apk
+		[ $# -gt 0 ] || abort "no apks in bundle '$file'"
+	else
+		set -- "$file"
+	fi
+	for apk in "$@"; do
+		sig=$(apk_signer "$apk") || abort "apksigner could not verify '$apk'"
+		if [ -z "$expected" ]; then
+			apksigner verify --print-certs "$apk" | grep '^Signer' >&2
+			abort "no signature for $pkg in sig.txt (stock signer: $sig)"
+		fi
+		[ "$sig" = "$expected" ] || abort "stock signature mismatch in '${apk##*/}': expected $expected, got '$sig'"
+	done
+	[ -z "${dir-}" ] || rm -rf "$dir"
+	echo "$sig"
 }

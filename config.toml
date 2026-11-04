@@ -13,7 +13,6 @@ apkmirror-dlurl = "https://www.apkmirror.com/apk/google-inc/youtube"
 [X]
 package = "com.twitter.android"
 patches-repo = "crimera/piko"
-included-patches = ["Bring back twitter"]
 apkmirror-dlurl = "https://www.apkmirror.com/apk/x-corp/twitter"
 
 [Instagram]

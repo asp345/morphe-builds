@@ -72,12 +72,19 @@ esac
 [ -n "$ARCHIVE_DLURL" ] || [ -n "$APKMIRROR_DLURL" ] || abort "set archive-dlurl or apkmirror-dlurl in [$APP]"
 
 req() {
-	local url=$1 out=$2
+	local url=$1 out=$2 status
 	local args=(-sSfL --connect-timeout 10 --retry 2 -c "$TEMP_DIR/cookie.txt" -b "$TEMP_DIR/cookie.txt" -H "User-Agent: $USER_AGENT")
 	if [ "$out" = - ]; then
 		curl "${args[@]}" "$url"
 	else
-		curl "${args[@]}" "$url" -o "$out.part" && mv -f "$out.part" "$out"
+		status=$(curl "${args[@]}" "$url" -o "$out.part" -w '%{http_code}')
+		if [ "$status" = 200 ]; then
+			mv -f "$out.part" "$out"
+			return 0
+		fi
+		rm -f "$out.part"
+		epr "HTTP $status from $url"
+		return 1
 	fi
 }
 

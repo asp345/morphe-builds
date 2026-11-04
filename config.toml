@@ -13,6 +13,7 @@ apkmirror-dlurl = "https://www.apkmirror.com/apk/google-inc/youtube"
 [X]
 package = "com.twitter.android"
 patches-repo = "crimera/piko-newx"
+excluded-patches = ["NewX: Restore Twitter branding"]
 apkmirror-dlurl = "https://www.apkmirror.com/apk/x-corp/twitter"
 
 [Instagram]

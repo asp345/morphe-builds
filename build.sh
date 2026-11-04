@@ -116,9 +116,9 @@ get_cli() {
 }
 
 get_patches_release() {
-	PATCHES_RELEASE=$(gh api "repos/${PATCHES_REPO}/releases?per_page=1" --jq '.[0]') ||
+	PATCHES_RELEASE=$(gh api "repos/${PATCHES_REPO}/releases?per_page=100" --jq '[.[] | select(.prerelease == false)] | .[0]') ||
 		abort "could not get releases of $PATCHES_REPO"
-	PATCHES_TAG=$(jq -e -r .tag_name <<<"$PATCHES_RELEASE") || abort "$PATCHES_REPO has no release"
+	PATCHES_TAG=$(jq -e -r .tag_name <<<"$PATCHES_RELEASE") || abort "$PATCHES_REPO has no stable release"
 }
 
 get_patches() {

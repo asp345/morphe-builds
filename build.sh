@@ -16,30 +16,54 @@ for cmd in curl jq python3 tar sha256sum gh; do
 	command -v "$cmd" >/dev/null || abort "'$cmd' is not installed"
 done
 
-APKMIRROR_VARIANTS=$(cat <<'EOF'
+APKMIRROR_VARIANT=$(cat <<'EOF'
 import html, re, sys
 
-page = sys.stdin.read()
-rx_row = re.compile(r'<div class="table-row(?: headerFont)?[^"]*"[^>]*>', re.S)
-rx_cell = re.compile(r'<div class="table-cell[^"]*"[^>]*>', re.S)
-rx_text = re.compile(r'<[^>]+>', re.S)
-rx_dpi = re.compile(r'[0-9a-z-]+dpi')
+page, arch, code = sys.stdin.read(), sys.argv[1], sys.argv[2]
+arches = {'universal', 'noarch', 'arm64-v8a + armeabi-v7a', arch}
+
+rx_row = re.compile(r'<div class="table-row(?: headerFont)?[^"]*"[^>]*>')
+rx_cell = re.compile(r'<div class="table-cell[^"]*"[^>]*>')
+rx_tag = re.compile(r'<[^>]+>')
+rx_dpi = re.compile(r'([0-9]+)-([0-9]+)dpi')
 rx_link = re.compile(r'href="(/apk/[^"]*-android-apk-download/)')
 
-starts = [match.start() for match in rx_row.finditer(page)]
-for index, start in enumerate(starts, 1):
-    end = starts[index] if index < len(starts) else len(page)
-    row = page[start:end]
-    cells = rx_cell.split(row)[1:]
-    if len(cells) < 4:
-        continue
-    texts = [re.sub(r'\\s+', ' ', html.unescape(rx_text.sub(' ', cell))).strip() for cell in cells]
-    dpi = rx_dpi.search(texts[3])
-    if dpi is None:
-        continue
-    kind = 'BUNDLE' if ' BUNDLE ' in ' ' + texts[0] + ' ' else 'APK'
-    link = rx_link.search(row)
-    print('	'.join([str(index), kind, texts[1], dpi.group(0), link.group(1) if link else '']))
+
+def rows():
+    starts = [match.start() for match in rx_row.finditer(page)]
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(page)
+        row = page[start:end]
+        cells = rx_cell.split(row)[1:]
+        link = rx_link.search(row)
+        if len(cells) < 4 or link is None:
+            continue
+        texts = [re.sub(r'\s+', ' ', html.unescape(rx_tag.sub(' ', cell))).strip() for cell in cells]
+        version_cell = texts[0].split()
+        yield {
+            'kind': 'BUNDLE' if 'BUNDLE' in version_cell else 'APK',
+            'arch': texts[1],
+            'dpi': texts[3],
+            'codes': version_cell,
+            'link': link.group(1),
+        }
+
+
+candidates = [row for row in rows() if row['arch'] in arches]
+if code:
+    candidates = [row for row in candidates if code in row['codes']]
+if not candidates:
+    sys.exit('no %s variant of the version%s' % (arch, ' with version code ' + code if code else ''))
+
+
+def rank(row):
+    span = rx_dpi.search(row['dpi'])
+    width = int(span.group(2)) - int(span.group(1)) if span else 0
+    return ('APK', 'BUNDLE').index(row['kind']), -width, -len(row['arch'])
+
+
+best = min(candidates, key=rank)
+print('\t'.join([best['kind'], best['arch'], best['dpi'], best['link']]))
 EOF
 )
 java_isolated() { env -i PATH=/usr/bin:/bin HOME="$PWD/$TEMP_DIR" "$JAVA_BIN" --enable-native-access=ALL-UNNAMED "$@"; }
@@ -77,8 +101,6 @@ ARCH=$(app arch)
 ARCH=${ARCH:-arm64-v8a}
 BUILD_MODE=$(app build-mode)
 BUILD_MODE=${BUILD_MODE:-apk}
-DPI=$(app dpi)
-DPI=${DPI:-"nodpi anydpi 120-640dpi"}
 ARCHIVE_DLURL=$(app archive-dlurl)
 APKMIRROR_DLURL=$(app apkmirror-dlurl)
 mapfile -t EXCLUDED_PATCHES < <(app_list excluded-patches)
@@ -115,27 +137,8 @@ req() {
 	fi
 }
 
-req_package() {
-	local url=$1 out=$2 status
-	local args=(-sSfL --connect-timeout 10 --retry 2 -c "$TEMP_DIR/cookie.txt" -b "$TEMP_DIR/cookie.txt" -H "User-Agent: $USER_AGENT")
-	status=$(curl "${args[@]}" "$url" -o "$out.part" -w '%{http_code}')
-	if [ "$status" = 200 ] && [ "$(head -c 2 "$out.part")" = PK ]; then
-		mv -f "$out.part" "$out"
-		return 0
-	fi
-	epr "no package at $url (HTTP ${status:-0}): $(head -c 60 "$out.part" | tr -d '\0\n')"
-	rm -f "$out.part"
-	return 1
-}
-
 verify_package() {
-	local f=$1 magic
-	case "$f" in
-	*.apk | *.apkm | *.apks | *.xapk) ;;
-	*) return ;;
-	esac
-	magic=$(head -c 2 "$f")
-	[ "$magic" = PK ] || abort "'$f' is not a package (starts with '$(head -c 60 "$f" | tr -d '\0\n')')"
+	[ "$(head -c 2 "$1")" = PK ] || abort "'$1' is not an APK bundle: $(head -c 80 "$1" | tr -d '\0\n')"
 }
 
 get_cf_clearance() {
@@ -206,7 +209,7 @@ resolve_version() {
 	local op
 	op=$(java_isolated -jar "$CLI_JAR" list-versions --patches="$PATCHES_FILE" -f "$PKG_NAME" 2>&1) ||
 		abort "list-versions failed: $op"
-	sed -n '/Most common compatible versions:/,$p' <<<"$op" | awk -v re="$VERSION_RE" 'NR > 1 && $1 ~ re {print $1}' | sort_versions | tail -1
+	sed -n '/Most common compatible versions:/,$p' <<<"$op" | awk -v re="$VERSION_RE" 'NR > 1 && $1 ~ re {print $1}' | sort -V -u | tail -1
 }
 
 dl_archive() {
@@ -216,62 +219,40 @@ dl_archive() {
 		if grep -qF "href=\"${file}\"" <<<"$listing"; then
 			pr "Downloading ${ARCHIVE_DLURL}/${file}"
 			STOCK_APK="$base.apk"
-			req_package "${ARCHIVE_DLURL}/${file}" "$STOCK_APK"
+			req "${ARCHIVE_DLURL}/${file}" "$STOCK_APK"
 			return
 		fi
 	done
 	return 1
 }
 
-apkmirror_variants() {
-	python3 -c "$APKMIRROR_VARIANTS" <<<"$1"
-}
-
-sort_versions() { sort -V -u; }
-
-apkmirror_search() {
-	local resp=$1 arch=$2 type=$3 n kind arch_cell dpi_cell link apparch appdpi
-	apparch=('universal' 'noarch' 'arm64-v8a + armeabi-v7a')
-	if [ "$arch" != all ]; then apparch+=("$arch"); fi
-	read -r -a appdpi <<<"$DPI"
-	while IFS=$'\t' read -r n kind arch_cell dpi_cell link; do
-		[ "$kind" = "$type" ] || continue
-		if [ -z "$APP_VERSION_CODE" ]; then
-			printf '%s\n' "${appdpi[@]}" | grep -qxF -- "$dpi_cell" || continue
-		fi
-		printf '%s\n' "${apparch[@]}" | grep -qxF -- "$arch_cell" || continue
-		echo "$link"
-		return 0
-	done < <(apkmirror_variants "$resp")
-	return 1
+apkmirror_variant() {
+	local resp=$1 arch=$2 out
+	out=$(python3 -c "$APKMIRROR_VARIANT" "$arch" "${APP_VERSION_CODE-}" 2>&1 <<<"$resp") ||
+		{ epr "$out"; return 1; }
+	printf '%s\n' "$out"
 }
 
 dl_apkmirror() {
-	local version=$1 base=$2 arch=$ARCH ext=apk name url resp dlurl type
+	local version=$1 base=$2 arch=$ARCH ext=apk name url resp dlurl type sel variant_dpi
 	if [ "$arch" = arm-v7a ]; then arch=armeabi-v7a; fi
 	req "$APKMIRROR_DLURL/" - >/dev/null 2>&1 || get_cf_clearance "$APKMIRROR_DLURL" || return 1
-	name=$($HTMLQ "h1.marginZero" --text <<<"$(req "$APKMIRROR_DLURL/" -)") || return 1
+	name=$($HTMLQ "h1.marginZero" --text <<<"$(req "$APKMIRROR_DLURL/" -)")
 	name=${name,,} name=${name// /-} name=${name//[^a-z0-9-]/}
+	[ -n "$name" ] || { epr "no app name on $APKMIRROR_DLURL"; return 1; }
 	resp=$(req "${APKMIRROR_DLURL}/${name}-${version//./-}-release/" -) || return 1
-	if [ -n "$(apkmirror_variants "$resp")" ]; then
-		dlurl=""
-		for type in APK BUNDLE; do
-			if dlurl=$(apkmirror_search "$resp" "$arch" "$type"); then
-				[ "$type" = BUNDLE ] && ext=apkm
-				break
-			fi
-			type=""
-		done
-		[ -n "$type" ] || { epr "no $arch variant of $version${APP_VERSION_CODE:+ ($APP_VERSION_CODE)} on APKMirror"; return 1; }
-		resp=$(req "https://www.apkmirror.com${dlurl}" -) || return 1
-	fi
+	sel=$(apkmirror_variant "$resp" "$arch") || return 1
+	IFS=$'\t' read -r type arch variant_dpi dlurl <<<"$sel"
+	[ "$type" = BUNDLE ] && ext=apkm
+	pr "Using the $type variant $arch $variant_dpi of $version"
+	resp=$(req "https://www.apkmirror.com${dlurl}" -) || return 1
 	url=$($HTMLQ --base https://www.apkmirror.com --attribute href 'a.btn[href]' <<<"$resp" | grep -E '/download/\?key=' | head -1)
 	[ -n "$url" ] || return 1
 	pr "Downloading $url"
 	STOCK_APK="$base.$ext"
 	# Fetching the presigned R2 URL directly drops the cf_clearance cookie, which makes Cloudflare
 	# answer the file request with a challenge page, so the file goes through the redirect.
-	req_package "$(req "$url" - | $HTMLQ --base https://www.apkmirror.com --attribute href 'span > a[rel = nofollow]' | head -1)" "$STOCK_APK"
+	req "$(req "$url" - | $HTMLQ --base https://www.apkmirror.com --attribute href 'span > a[rel = nofollow]' | head -1)" "$STOCK_APK"
 }
 
 get_stock() {
@@ -300,13 +281,13 @@ patch_app() {
 	local excluded=("${EXCLUDED_PATCHES[@]}")
 	if [ "$mode" = module ] && grep -qFx -- "$GMSCORE_PATCH" <<<"$PATCH_NAMES"; then excluded+=("$GMSCORE_PATCH"); fi
 	rm -f "$result"
-	local args=(-jar "$CLI_JAR" patch "$STOCK_APK" -o "$out" --unsigned -t "$PWD/$TEMP_DIR/patch-tmp" -r "$PWD/$result")
+	local args=(-jar "$CLI_JAR" patch "$PWD/$STOCK_APK" -o "$PWD/$out" --unsigned -t "$PWD/$TEMP_DIR/patch-tmp" -r "$PWD/$result")
 	if [ "$ARCH" = arm-v7a ]; then
 		args+=(--striplibs armeabi-v7a)
 	elif [ "$ARCH" != all ]; then
 		args+=(--striplibs "$ARCH")
 	fi
-	args+=(-p "$PATCHES_FILE")
+	args+=(-p "$PWD/$PATCHES_FILE")
 	for p in "${INCLUDED_PATCHES[@]}"; do args+=(-e "$p"); done
 	for p in "${excluded[@]}"; do args+=(-d "$p"); done
 	args+=("${PATCHER_ARGS[@]}")

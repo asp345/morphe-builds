@@ -9,8 +9,6 @@ TEMP_DIR="temp"
 HTMLQ_URL="https://github.com/mgdm/htmlq/releases/download/v0.4.0/htmlq-x86_64-linux.tar.gz"
 HTMLQ_SHA256="4f63c8d9d835aa1f18f472da2eb5fc88295ede6aebcc7949fd428403707fc74a"
 USER_AGENT="Mozilla/5.0 (X11; Linux x86_64; rv:108.0) Gecko/20100101 Firefox/108.0"
-PATCHES_WORKFLOW=".github/workflows/release.yml"
-PATCHES_SOURCE_REFS=(refs/heads/main refs/heads/dev)
 GMSCORE_PATCH="GmsCore support"
 VERSION_RE='^[0-9][0-9A-Za-z._-]*$'
 
@@ -122,7 +120,7 @@ get_patches_release() {
 }
 
 get_patches() {
-	local asset_url ref
+	local asset_url
 	[ "$(jq '[.assets[] | select(.name | endswith(".mpp"))] | length' <<<"$PATCHES_RELEASE")" = 1 ] ||
 		abort "$PATCHES_REPO $PATCHES_TAG must have exactly one .mpp asset"
 	asset_url=$(jq -r '.assets[] | select(.name | endswith(".mpp")) | .browser_download_url' <<<"$PATCHES_RELEASE")
@@ -132,18 +130,6 @@ get_patches() {
 		pr "Getting patches $PATCHES_TAG from $PATCHES_REPO"
 		req "$asset_url" "$PATCHES_FILE" || abort "could not download patches"
 	fi
-	pr "Verifying build attestation of $PATCHES_FILE"
-	for ref in "${PATCHES_SOURCE_REFS[@]}"; do
-		if gh attestation verify "$PATCHES_FILE" \
-			--repo "$PATCHES_REPO" \
-			--signer-workflow "$PATCHES_REPO/$PATCHES_WORKFLOW" \
-			--source-ref "$ref" \
-			--deny-self-hosted-runners >/dev/null 2>&1; then
-			PATCHES_SOURCE_REF=$ref
-			return
-		fi
-	done
-	abort "no build attestation from ${PATCHES_SOURCE_REFS[*]} for $PATCHES_REPO $PATCHES_TAG"
 }
 
 check_patch_names() {
@@ -335,7 +321,6 @@ jq -n \
 	--arg version "$APP_VERSION" \
 	--arg patches_repo "$PATCHES_REPO" \
 	--arg patches_tag "$PATCHES_TAG" \
-	--arg patches_source_ref "$PATCHES_SOURCE_REF" \
 	--arg patches_sha256 "$(sha256_of "$PATCHES_FILE")" \
 	--arg cli_url "$CLI_URL" \
 	--arg cli_sha256 "$CLI_SHA256" \

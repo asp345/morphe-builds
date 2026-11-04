@@ -12,11 +12,10 @@ apkmirror-dlurl = "https://www.apkmirror.com/apk/google-inc/youtube"
 
 [X]
 package = "com.twitter.android"
-patches-repo = "crimera/piko"
-excluded-patches = ["Change app icon"]
+patches-repo = "crimera/piko-newx"
 apkmirror-dlurl = "https://www.apkmirror.com/apk/x-corp/twitter"
 
 [Instagram]
 package = "com.instagram.android"
-patches-repo = "crimera/piko"
+patches-repo = "crimera/piko-ig-lite"
 apkmirror-dlurl = "https://www.apkmirror.com/apk/instagram/instagram-instagram"

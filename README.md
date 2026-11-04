@@ -1,6 +1,6 @@
 # Morphe builds
 
-Non-root APKs of YouTube patched with [Morphe patches](https://github.com/MorpheApp/morphe-patches), and of X and Instagram patched with [Piko patches](https://github.com/crimera/piko). YouTube is also built as a root module. Downloads are in [releases](../../releases).
+Non-root APKs of YouTube patched with [Morphe patches](https://github.com/MorpheApp/morphe-patches), of X patched with [Piko NewX](https://github.com/crimera/piko-newx), and of Instagram patched with [Piko IG Lite](https://github.com/crimera/piko-ig-lite). YouTube is also built as a root module. Downloads are in [releases](../../releases).
 
 The YouTube APK needs [MicroG-RE](https://github.com/MorpheApp/MicroG-RE).
 
@@ -37,7 +37,8 @@ In the `release` environment:
 ## Dependencies
 
 - [Morphe patches](https://github.com/MorpheApp/morphe-patches)
-- [Piko patches](https://github.com/crimera/piko)
+- [Piko NewX patches](https://github.com/crimera/piko-newx)
+- [Piko IG Lite patches](https://github.com/crimera/piko-ig-lite)
 - [Morphe CLI](https://github.com/MorpheApp/morphe-desktop)
 - Stock APKs from archive.org (YouTube) and APKMirror
 - [htmlq](https://github.com/mgdm/htmlq) v0.4.0

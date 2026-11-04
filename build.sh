@@ -105,14 +105,27 @@ req() {
 		curl "${args[@]}" "$url"
 	else
 		status=$(curl "${args[@]}" "$url" -o "$out.part" -w '%{http_code}')
-		if [ "$status" = 200 ] && [ -s "$out.part" ] && [ "$(head -c 2 "$out.part")" = PK ]; then
+		if [ "$status" = 200 ] && [ -s "$out.part" ]; then
 			mv -f "$out.part" "$out"
 			return 0
 		fi
 		rm -f "$out.part"
-		epr "no package from $url (HTTP ${status:-0}, check the APKMirror clearance)"
+		epr "HTTP ${status:-0} from $url"
 		return 1
 	fi
+}
+
+req_package() {
+	local url=$1 out=$2 status
+	local args=(-sSfL --connect-timeout 10 --retry 2 -c "$TEMP_DIR/cookie.txt" -b "$TEMP_DIR/cookie.txt" -H "User-Agent: $USER_AGENT")
+	status=$(curl "${args[@]}" "$url" -o "$out.part" -w '%{http_code}')
+	if [ "$status" = 200 ] && [ "$(head -c 2 "$out.part")" = PK ]; then
+		mv -f "$out.part" "$out"
+		return 0
+	fi
+	epr "no package at $url (HTTP ${status:-0}): $(head -c 60 "$out.part" | tr -d '\0\n')"
+	rm -f "$out.part"
+	return 1
 }
 
 verify_package() {
@@ -203,7 +216,7 @@ dl_archive() {
 		if grep -qF "href=\"${file}\"" <<<"$listing"; then
 			pr "Downloading ${ARCHIVE_DLURL}/${file}"
 			STOCK_APK="$base.apk"
-			req "${ARCHIVE_DLURL}/${file}" "$STOCK_APK"
+			req_package "${ARCHIVE_DLURL}/${file}" "$STOCK_APK"
 			return
 		fi
 	done
@@ -258,7 +271,7 @@ dl_apkmirror() {
 	STOCK_APK="$base.$ext"
 	# Fetching the presigned R2 URL directly drops the cf_clearance cookie, which makes Cloudflare
 	# answer the file request with a challenge page, so the file goes through the redirect.
-	req "$(req "$url" - | $HTMLQ --base https://www.apkmirror.com --attribute href 'span > a[rel = nofollow]' | head -1)" "$STOCK_APK"
+	req_package "$(req "$url" - | $HTMLQ --base https://www.apkmirror.com --attribute href 'span > a[rel = nofollow]' | head -1)" "$STOCK_APK"
 }
 
 get_stock() {

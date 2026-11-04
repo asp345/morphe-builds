@@ -193,7 +193,7 @@ resolve_version() {
 	local op
 	op=$(java_isolated -jar "$CLI_JAR" list-versions --patches="$PATCHES_FILE" -f "$PKG_NAME" 2>&1) ||
 		abort "list-versions failed: $op"
-	sed -n '/Most common compatible versions:/,$p' <<<"$op" | awk -v re="$VERSION_RE" 'NR > 1 && $1 ~ re' | sort_versions | tail -1
+	sed -n '/Most common compatible versions:/,$p' <<<"$op" | awk -v re="$VERSION_RE" 'NR > 1 && $1 ~ re {print $1}' | sort_versions | tail -1
 }
 
 dl_archive() {

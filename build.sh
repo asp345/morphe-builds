@@ -15,6 +15,33 @@ VERSION_RE='^[0-9][0-9A-Za-z._-]*$'
 for cmd in curl jq python3 tar sha256sum gh; do
 	command -v "$cmd" >/dev/null || abort "'$cmd' is not installed"
 done
+
+APKMIRROR_VARIANTS=$(cat <<'EOF'
+import html, re, sys
+
+page = sys.stdin.read()
+rx_row = re.compile(r'<div class="table-row(?: headerFont)?[^"]*"[^>]*>', re.S)
+rx_cell = re.compile(r'<div class="table-cell[^"]*"[^>]*>', re.S)
+rx_text = re.compile(r'<[^>]+>', re.S)
+rx_dpi = re.compile(r'[0-9a-z-]+dpi')
+rx_link = re.compile(r'href="(/apk/[^"]*-android-apk-download/)')
+
+starts = [match.start() for match in rx_row.finditer(page)]
+for index, start in enumerate(starts, 1):
+    end = starts[index] if index < len(starts) else len(page)
+    row = page[start:end]
+    cells = rx_cell.split(row)[1:]
+    if len(cells) < 4:
+        continue
+    texts = [re.sub(r'\\s+', ' ', html.unescape(rx_text.sub(' ', cell))).strip() for cell in cells]
+    dpi = rx_dpi.search(texts[3])
+    if dpi is None:
+        continue
+    kind = 'BUNDLE' if ' BUNDLE ' in ' ' + texts[0] + ' ' else 'APK'
+    link = rx_link.search(row)
+    print('	'.join([str(index), kind, texts[1], dpi.group(0), link.group(1) if link else '']))
+EOF
+)
 java_isolated() { env -i PATH=/usr/bin:/bin HOME="$PWD/$TEMP_DIR" "$JAVA_BIN" --enable-native-access=ALL-UNNAMED "$@"; }
 
 CONFIG=$(config_json config.toml)
@@ -78,14 +105,24 @@ req() {
 		curl "${args[@]}" "$url"
 	else
 		status=$(curl "${args[@]}" "$url" -o "$out.part" -w '%{http_code}')
-		if [ "$status" = 200 ]; then
+		if [ "$status" = 200 ] && [ -s "$out.part" ] && [ "$(head -c 2 "$out.part")" = PK ]; then
 			mv -f "$out.part" "$out"
 			return 0
 		fi
 		rm -f "$out.part"
-		epr "HTTP $status from $url"
+		epr "no package from $url (HTTP ${status:-0}, check the APKMirror clearance)"
 		return 1
 	fi
+}
+
+verify_package() {
+	local f=$1 magic
+	case "$f" in
+	*.apk | *.apkm | *.apks | *.xapk) ;;
+	*) return ;;
+	esac
+	magic=$(head -c 2 "$f")
+	[ "$magic" = PK ] || abort "'$f' is not a package (starts with '$(head -c 60 "$f" | tr -d '\0\n')')"
 }
 
 get_cf_clearance() {
@@ -156,7 +193,7 @@ resolve_version() {
 	local op
 	op=$(java_isolated -jar "$CLI_JAR" list-versions --patches="$PATCHES_FILE" -f "$PKG_NAME" 2>&1) ||
 		abort "list-versions failed: $op"
-	sed -n '/Most common compatible versions:/,$p' <<<"$op" | awk -v re="$VERSION_RE" 'NR > 1 && $1 ~ re {$1 = $1; print}' | sort -V | tail -1
+	sed -n '/Most common compatible versions:/,$p' <<<"$op" | awk -v re="$VERSION_RE" 'NR > 1 && $1 ~ re' | sort_versions | tail -1
 }
 
 dl_archive() {
@@ -173,70 +210,55 @@ dl_archive() {
 	return 1
 }
 
+apkmirror_variants() {
+	python3 -c "$APKMIRROR_VARIANTS" <<<"$1"
+}
+
+sort_versions() { sort -V -u; }
+
 apkmirror_search() {
-	local resp=$1 arch=$2 type=$3 n node app_table dlurl="" appdpi
-	local apparch=('universal' 'noarch' 'arm64-v8a + armeabi-v7a')
+	local resp=$1 arch=$2 type=$3 n kind arch_cell dpi_cell link apparch appdpi
+	apparch=('universal' 'noarch' 'arm64-v8a + armeabi-v7a')
 	if [ "$arch" != all ]; then apparch+=("$arch"); fi
 	read -r -a appdpi <<<"$DPI"
-	for ((n = 1; n < 40; n++)); do
-		node=$($HTMLQ "div.table-row.headerFont:nth-last-child($n)" -r "span:nth-child(n+3)" <<<"$resp")
-		[ -n "$node" ] || break
-		[ -n "$($HTMLQ -t -w "div.table-cell:nth-child(1) > a:nth-child(1)" <<<"$node" | xargs)" ] || break
-		app_table=$($HTMLQ --text --ignore-whitespace <<<"$node")
-		[ "$(sed -n 3p <<<"$app_table")" = "$type" ] || continue
-		dlurl=$($HTMLQ --base https://www.apkmirror.com --attribute href "div:nth-child(1) > a:nth-child(1)" <<<"$node")
-		if [ -n "$APP_VERSION_CODE" ]; then
-			if $HTMLQ "div.table-row.headerFont:nth-last-child($n)" --text --ignore-whitespace <<<"$resp" | grep -qFx -- "$APP_VERSION_CODE" &&
-				printf '%s\n' "${apparch[@]}" | grep -qFx -- "$(sed -n 4p <<<"$app_table")"; then
-				echo "$dlurl"
-				return 0
-			fi
-			continue
+	while IFS=$'\t' read -r n kind arch_cell dpi_cell link; do
+		[ "$kind" = "$type" ] || continue
+		if [ -z "$APP_VERSION_CODE" ]; then
+			printf '%s\n' "${appdpi[@]}" | grep -qxF -- "$dpi_cell" || continue
 		fi
-		if printf '%s\n' "${appdpi[@]}" | grep -qFx -- "$(sed -n 6p <<<"$app_table")" &&
-			printf '%s\n' "${apparch[@]}" | grep -qFx -- "$(sed -n 4p <<<"$app_table")"; then
-			echo "$dlurl"
-			return 0
-		fi
-	done
-	if [ -z "$APP_VERSION_CODE" ] && [ "$n" -eq 2 ] && [ -n "$dlurl" ]; then
-		echo "$dlurl"
+		printf '%s\n' "${apparch[@]}" | grep -qxF -- "$arch_cell" || continue
+		echo "$link"
 		return 0
-	fi
+	done < <(apkmirror_variants "$resp")
 	return 1
 }
 
 dl_apkmirror() {
-	local version=$1 base=$2 arch=$ARCH ext=apk app_page name url resp dlurl type
+	local version=$1 base=$2 arch=$ARCH ext=apk name url resp dlurl type
 	if [ "$arch" = arm-v7a ]; then arch=armeabi-v7a; fi
-	if ! app_page=$(req "$APKMIRROR_DLURL" - 2>/dev/null); then
-		get_cf_clearance "$APKMIRROR_DLURL" || return 1
-		app_page=$(req "$APKMIRROR_DLURL" -) || return 1
-	fi
-	name=$($HTMLQ "h1.marginZero" --text <<<"$app_page")
+	req "$APKMIRROR_DLURL/" - >/dev/null 2>&1 || get_cf_clearance "$APKMIRROR_DLURL" || return 1
+	name=$($HTMLQ "h1.marginZero" --text <<<"$(req "$APKMIRROR_DLURL/" -)") || return 1
 	name=${name,,} name=${name// /-} name=${name//[^a-z0-9-]/}
 	resp=$(req "${APKMIRROR_DLURL}/${name}-${version//./-}-release/" -) || return 1
-	if [ -n "$($HTMLQ "div.table-row.headerFont:nth-last-child(1)" -r "span:nth-child(n+3)" <<<"$resp")" ]; then
+	if [ -n "$(apkmirror_variants "$resp")" ]; then
 		dlurl=""
 		for type in APK BUNDLE; do
 			if dlurl=$(apkmirror_search "$resp" "$arch" "$type"); then
-				if [ "$type" = BUNDLE ]; then ext=apkm; fi
+				[ "$type" = BUNDLE ] && ext=apkm
 				break
 			fi
+			type=""
 		done
-		if [ -z "$dlurl" ]; then
-			epr "no $arch variant of $version${APP_VERSION_CODE:+ ($APP_VERSION_CODE)} found on APKMirror"
-			return 1
-		fi
-		resp=$(req "$dlurl" -) || return 1
+		[ -n "$type" ] || { epr "no $arch variant of $version${APP_VERSION_CODE:+ ($APP_VERSION_CODE)} on APKMirror"; return 1; }
+		resp=$(req "https://www.apkmirror.com${dlurl}" -) || return 1
 	fi
-	url=$($HTMLQ --base https://www.apkmirror.com --attribute href "a.btn" <<<"$resp" | head -1)
-	[ -n "$url" ] || return 1
-	url=$(req "$url" - | $HTMLQ --base https://www.apkmirror.com --attribute href "span > a[rel = nofollow]" | head -1)
+	url=$($HTMLQ --base https://www.apkmirror.com --attribute href 'a.btn[href]' <<<"$resp" | grep -E '/download/\?key=' | head -1)
 	[ -n "$url" ] || return 1
 	pr "Downloading $url"
 	STOCK_APK="$base.$ext"
-	req "$url" "$STOCK_APK"
+	# Fetching the presigned R2 URL directly drops the cf_clearance cookie, which makes Cloudflare
+	# answer the file request with a challenge page, so the file goes through the redirect.
+	req "$(req "$url" - | $HTMLQ --base https://www.apkmirror.com --attribute href 'span > a[rel = nofollow]' | head -1)" "$STOCK_APK"
 }
 
 get_stock() {
@@ -256,6 +278,7 @@ get_stock() {
 			abort "could not download $PKG_NAME $version ($ARCH)"
 		fi
 	fi
+	verify_package "$STOCK_APK"
 	STOCK_SIGNER=$(stock_signature "$STOCK_APK" "$PKG_NAME")
 }
 

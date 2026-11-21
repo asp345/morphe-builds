@@ -1,6 +1,6 @@
 cli-repo = "MorpheApp/morphe-desktop"
-cli-url = "https://github.com/MorpheApp/morphe-desktop/releases/download/v2.2.0/morphe-desktop-2.2.0-all.jar"
-cli-sha256 = "5ca0320ee05481df1ae3afd2f003bba3ff994d11d1f66ae48811ced71355e4fe"
+cli-url = "https://github.com/MorpheApp/morphe-desktop/releases/download/v2.3.0/morphe-desktop-2.3.0-all.jar"
+cli-sha256 = "e0e49525e1fbe1108d6cfd7398d39e0cd489c58a753e63653c1e8f11a0099757"
 
 [YouTube]
 package = "com.google.android.youtube"
